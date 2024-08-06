@@ -33,11 +33,10 @@ def load_image(path, include_points, exclude_points):
     input_labels = np.array([1] * include_count + [0] * exclude_count)
 
 
-    masks, scores, _ = predictor.predict(
+    masks, _, _ = predictor.predict(
     point_coords=input_points,
     point_labels=input_labels,
     multimask_output=False,
     )
     mask = masks[0]
-    print(np.max(mask))
     return mask

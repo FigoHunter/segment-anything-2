@@ -65,6 +65,7 @@ history = History(selection, MAX_HISTORY_SIZE)
 
 
 for image in images:
+    print(f"Processing {image}")
     mask_path = image.replace('rgb', 'masks')
     org_img = cv2.imread(image, cv2.IMREAD_UNCHANGED)
     img_file=image
