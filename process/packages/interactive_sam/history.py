@@ -115,6 +115,7 @@ class History:
         else:
             return None
 
+
     # def __get_history(self,obj):
     #     if self.__key(obj) not in self.__history:
     #         self.__history[self.__key(obj)] = HistorySlice(MAX_HISTORY_SIZE)

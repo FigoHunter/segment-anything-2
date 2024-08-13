@@ -6,6 +6,6 @@ setup(
     license='MIT',
     author='figo',
     description='figo',
-    install_requires=[],
+    install_requires=['pynput'],
     tests_require=[]
 )
