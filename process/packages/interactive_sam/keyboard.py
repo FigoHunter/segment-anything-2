@@ -208,13 +208,6 @@ class ListenerHandler:
                 self.callback_lock.release()
         self._current_keys = self._current_keys & ~code
 
-    def get_keys(self, keys):
-        list = []
-        for key in Keys.__members__.values():
-            if keys & key:
-                list.append(key)
-        return list
-
     def register_callback(self, keys, event:Event, callback):
         # Register a callback for a specific set of keys
         if event == Event.PRESS:
@@ -356,6 +349,12 @@ KEYS_MAP = {
 def get_key_handler():
     return ListenerHandler()
 
+def get_keys(keys):
+    list = []
+    for key in Keys.__members__.values():
+        if keys & key:
+            list.append(key)
+    return list
 
 class Operation(Enum):
     NONE = 0
