@@ -1,6 +1,5 @@
 from enum import Enum
 from threading import Lock
-from types import UnionType
 from pynput import keyboard
 from ._base import Action
 
@@ -208,16 +207,17 @@ class ListenerHandler:
                 self.callback_lock.release()
         self._current_keys = self._current_keys & ~code
 
-    def register_callback(self, keys, event:Event, callback):
+    def register_callback(self, keys, event:Event, callback, **kwargs):
+        keys = int(keys)
         # Register a callback for a specific set of keys
         if event == Event.PRESS:
             if keys not in self._on_press_callbacks:
                 self._on_press_callbacks[keys] = Action()
-            self._on_press_callbacks[keys] += callback
+            self._on_press_callbacks[keys].register(callback, **kwargs)
         elif event == Event.RELEASE:
             if keys not in self._on_release_callbacks:
                 self._on_release_callbacks[keys] = Action()
-            self._on_release_callbacks[keys] += callback
+            self._on_release_callbacks[keys].register(callback, **kwargs)
 
     def unregister_callback(self, keys, event:Event, callback):
         keys = int(keys)
@@ -227,8 +227,8 @@ class ListenerHandler:
         elif event == Event.RELEASE:
             self._on_release_callbacks[keys] -= callback
 
-    def register_op(self, operation, callback):
-        self.register_callback(operation.get_key(), operation.get_event(), callback)
+    def register_op(self, operation, callback, **kwargs):
+        self.register_callback(operation.get_key(), operation.get_event(), callback, **kwargs)
 
     def unregister_op(self, operation, event:Event, callback):
         self.unregister_callback(operation.get_key(),  operation.get_event(), callback)
@@ -355,31 +355,3 @@ def get_keys(keys):
         if keys & key:
             list.append(key)
     return list
-
-class Operation(Enum):
-    NONE = 0
-    NEXT_IMG = 1
-    PREV_IMG = 2
-    SAVE = 3
-    UNDO = 4
-    REDO = 5
-
-    QUIT=999
-
-    def get_key(self):
-        if self == Operation.NEXT_IMG:
-            return Keys.CTRL_L | Keys.RIGHT
-        elif self == Operation.PREV_IMG:
-            return Keys.CTRL_L | Keys.LEFT
-        elif self == Operation.SAVE:
-            return Keys.ENTER
-        elif self == Operation.UNDO:
-            return Keys.CTRL_L | Keys.KEY_Z
-        elif self == Operation.REDO:
-            return Keys.CTRL_L | Keys.KEY_Y
-        
-        elif self == Operation.QUIT:
-            return Keys.ESC
-
-    def get_event(self):
-        return Event.PRESS

@@ -6,6 +6,7 @@ import numpy as np
 from threading import Lock
 from interactive_sam.history import History
 from interactive_sam import mask_gen,keyboard
+from interactive_sam.operation import Operation
 from interactive_sam.utils import save_pkl,load_pkl
 
 MAX_HISTORY_SIZE = 100
@@ -67,7 +68,24 @@ def main():
             render_image()
             interface_lock.release()
 
-    @handler.register_op_wrap(keyboard.Operation.NEXT_IMG)
+    @handler.register_op_wrap(Operation.CLEAR)
+    def clear(key):
+        print('Clearing selection')
+        nonlocal selection, mask
+        interface_lock.acquire()
+        selection = [[], []]
+        history.register(selection)
+        mask = None
+        render_image()
+        interface_lock.release()
+
+    @handler.register_op_wrap(Operation.QUIT)
+    def quit(key):
+        cv2.destroyAllWindows()
+        handler.stop()
+        exit(0)
+
+    @handler.register_op_wrap(Operation.NEXT_IMG)
     def next_image(key):
         nonlocal image_id
         if image_id < len(images) - 1:
@@ -75,7 +93,7 @@ def main():
             reset_image()
             render_image()
         
-    @handler.register_op_wrap(keyboard.Operation.PREV_IMG)
+    @handler.register_op_wrap(Operation.PREV_IMG)
     def prev_image(key):
         nonlocal image_id
         if image_id > 0:
@@ -83,7 +101,7 @@ def main():
             reset_image()
             render_image()
 
-    @handler.register_op_wrap(keyboard.Operation.UNDO)
+    @handler.register_op_wrap(Operation.UNDO)
     def undo(key):
         nonlocal selection, mask
         img_file = images[image_id]
@@ -97,7 +115,7 @@ def main():
             render_image()
             interface_lock.release()
 
-    @handler.register_op_wrap(keyboard.Operation.REDO)
+    @handler.register_op_wrap(Operation.REDO)
     def redo(key):
         nonlocal selection, mask
         img_file = images[image_id]
@@ -111,7 +129,7 @@ def main():
             render_image()
             interface_lock.release()
 
-    @handler.register_op_wrap(keyboard.Operation.SAVE)
+    @handler.register_op_wrap(Operation.SAVE)
     def save(key):
         print('Saving mask')
         nonlocal mask, selection

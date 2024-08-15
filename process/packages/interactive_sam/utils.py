@@ -6,7 +6,7 @@ TEMPPATH = os.path.join(WORKSPACE, "temp")
 if not os.path.exists(TEMPPATH):
     os.makedirs(TEMPPATH)
 
-def createTempFolder(name):
+def create_temp_folder(name):
     path = os.path.join(TEMPPATH, name)
     # delete
     if os.path.exists(path):
