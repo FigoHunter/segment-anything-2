@@ -1,10 +1,10 @@
 import argparse
 import cv2
-from threading import Lock, Thread, RLock, Event as TEvent
+from enum import Enum
+from threading import Lock, Thread
 from interactive_sam.mask_gen import init_sam2_video, Sam2VideoHandle
-from interactive_sam import keyboard
+from interactive_sam import keyboard,FrameWait
 from interactive_sam.operation import Operation
-from interactive_sam.history import History
 from interactive_sam.color import get_color_from_set
 import numpy as np
 
@@ -17,55 +17,53 @@ parser.add_argument('path', type=str, help='Path to the videos')
 args = parser.parse_args()
 path = args.path
 
+
 class CacheImageReader:
-    LOAD_SIZE = 3
-    def __init__(self, cache_size=10):
+    def __init__(self, cache_size=15):
         self.cache = {}
         self._load_lock = Lock()
         self._cache_size = cache_size
-        self._queue_count=0
+        # self._queue_count=0
 
     def _cache(self, path, img):
         if len(self.cache) >= self._cache_size:
             self.cache.popitem()
         self.cache[path] = img
 
-
     def read(self, path):
         self._load_lock.acquire()
-        self._queue_count += 1
+        # self._queue_count += 1
 
         if path in self.cache:
             img = self.cache[path]
-            self._queue_count -= 1
+            # self._queue_count -= 1
             self._load_lock.release()
             return img
         img = cv2.imread(path)
         self.cache[path] = img
-        self._queue_count -= 1
+        # self._queue_count -= 1
         self._load_lock.release()
         return img
 
     def _async_read(self,  paths, idx, start_idx, end_idx):
-        for i in range(start_idx, end_idx):
-            if i == idx:
-                continue
-            if self._queue_count > self.LOAD_SIZE:
-                continue
-            self.read(paths[i])
+        prev_count = idx - start_idx
+        next_count = end_idx - idx
+        for i in range(max(prev_count, next_count)):
+            if i < next_count:
+                self.read(paths[idx + i + 1])
+            if i < prev_count:
+                self.read(paths[idx - i - 1])
 
-
-
-    def read_with_preload(self, paths, idx=0, *, range=2, thread=True):
-        start_idx = max(0, idx-range)
-        end_idx = min(len(paths), idx+range+1)
+    def read_with_preload(self, paths, idx=0, *, r=2, thread=True):
+        start_idx = max(0, idx-r)
+        end_idx = min(len(paths), idx+r)
         if not thread:
-            for i in range(start_idx, end_idx):
+            for i in range(start_idx, end_idx + 1):
                 self.read(paths[idx+i])
             return self.read(paths[idx])
         else:
             img = self.read(paths[idx])
-            Thread(target=self._async_read, args=(paths, idx, start_idx, end_idx)).start()
+            Thread(target=self._async_read, args=(paths, idx, start_idx, end_idx), daemon=True).start()
             return img 
 
 
@@ -88,14 +86,20 @@ def render_frame(base_img, task:Sam2VideoHandle.Task, *, sel_alpha=SEL_APLHA, al
     for obj, mask in zip(objs, masks):
         if mask is None:
             continue
-        if task.prompts.selected_obj == obj:
+        selected = task.get_current_obj()
+        if selected == obj:
             a = sel_alpha
         else:
             a = alpha
         color = get_color_from_set(obj)
         mask_colored = (cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR) * rgb2bgr(color)).astype(np.uint8)
         img = cv2.addWeighted(img, 1 - a, mask_colored, a, 0)
-    render_points(img, task.prompts.get_selection())
+    selection = task.get_selection()
+    if selection is not None:
+        include_points, exclude_points = selection
+    else:
+        include_points, exclude_points = None, None
+    render_points(img, include_points, exclude_points)
     return img
     
 
@@ -114,8 +118,10 @@ def main():
     key_handler = keyboard.get_key_handler()
     handle = init_sam2_video()
     print('init:', handle)
-    tasks = handle.load_frames(path,obj_list)
-    
+    tasks = handle.load_frames(path,obj_list, chunk_size=20)
+    key_handler.start()
+    frame_wait = FrameWait(0.5)
+
     for task in tasks:
         if len(task.frames)<1:
             print('No frames found in task. Skipping')
@@ -124,73 +130,134 @@ def main():
         task.start()
         rendered_img = None
         interface_lock = Lock()
-        history = History(task.prompts, MAX_HISTORY_SIZE)
         org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
         propagate = None
-        render_frame(org_img,task)
+        rendered_img = render_frame(org_img,task)
+        flag_labeling = False
+        is_dirty = False
 
         @key_handler.register_op_wrap(Operation.NEXT_IMG)
         def next_image(key):
             interface_lock.acquire()
+            nonlocal propagate
+            propagate = None
+            if flag_labeling:
+                print('Please press ENTER finish label')
+                return
+            nonlocal rendered_img
             task.next_frame()
             org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
-            render_frame(org_img, task)
+            rendered_img = render_frame(org_img,task)
             interface_lock.release()
 
 
         @key_handler.register_op_wrap(Operation.PREV_IMG)
         def prev_image(key):
             interface_lock.acquire()
+            nonlocal propagate
+            propagate = None
+            nonlocal rendered_img
             task.prev_frame()
             org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
-            render_frame(org_img, task)
+            rendered_img = render_frame(org_img,task)
             interface_lock.release()
 
+        @key_handler.register_op_wrap(Operation.NEXT_OBJ)
+        def next_obj(key):
+            interface_lock.acquire()
+            nonlocal propagate
+            propagate = None
+            nonlocal rendered_img
+            task.next_obj()
+            org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
+            rendered_img = render_frame(org_img,task)
+            print('Selected object:', task.get_current_obj())
+            interface_lock.release()
+
+        @key_handler.register_op_wrap(Operation.PREV_OBJ)
+        def prev_obj(key):
+            interface_lock.acquire()
+            nonlocal propagate
+            propagate = None
+            nonlocal rendered_img
+            task.prev_obj()
+            org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
+            rendered_img = render_frame(org_img,task)
+            print('Selected object:', task.get_current_obj())
+            interface_lock.release()
+
+        @key_handler.register_key_wrap(keyboard.Keys.ENTER, keyboard.Event.PRESS)
+        def on_enter(key):        
+            nonlocal flag_labeling, propagate, is_dirty
+            if flag_labeling:
+                try:
+                    interface_lock.acquire()
+                    propagate = None    
+                    if is_dirty:
+                        task.update_selection()
+                        is_dirty = False
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(e)
+                    interface_lock.release()
+                    return
+                print('Labeling finished')
+                flag_labeling = False
+                interface_lock.release()
+            else:
+                flag_labeling = True
+                print('Labeling started')
 
         def mouse_callback(event, x, y, flags, param):
-            if event == cv2.EVENT_MOUSEWHEEL:
-                if flags > 0:
-                    next_image(None)
-                else:
-                    prev_image(None)
-
-            if event == cv2.EVENT_LBUTTONUP:
-                if flags & cv2.EVENT_FLAG_CTRLKEY:
-                    interface_lock.acquire()
-                    frame,obj,selection = task.prompts.get_selection()
-                    if selection is None:
-                        selection = [[],[]]
-                    selection[1].append([x, y])
-                    task.prompts.set_selection(selection)
-                    task.update_selection()
-                elif flags & cv2.EVENT_FLAG_SHIFTKEY:
-                    interface_lock.acquire()
-                    frame,obj,selection = task.prompts.get_selection()
-                    if selection is None:
-                        selection = [[],[]]
-                    selection[0].append([x, y])
-                    task.prompts.set_selection(selection)
-                    task.update_selection()
-                else:
-                    return
-                history.register(task.prompts)
-                org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
-                render_frame(org_img, task)
-                interface_lock.release()
-                
+            nonlocal rendered_img, flag_labeling, is_dirty, propagate
+            try:
+                if event == cv2.EVENT_LBUTTONUP:
+                    if flags & cv2.EVENT_FLAG_CTRLKEY:
+                        interface_lock.acquire()
+                        propagate = None                        
+                        flag_labeling = True
+                        print('Labeling started')
+                        selection = task.get_selection()
+                        if selection is None:
+                            selection = [[],[]]
+                        selection[1].append([x, y])
+                        task.set_selection(selection)
+                        is_dirty = True
+                        task.register_history()
+                    elif flags & cv2.EVENT_FLAG_SHIFTKEY:
+                        interface_lock.acquire()
+                        propagate = None
+                        flag_labeling = True
+                        print('Labeling started')
+                        selection = task.get_selection()
+                        if selection is None:
+                            selection = [[],[]]
+                        selection[0].append([x, y])
+                        task.set_selection(selection)
+                        is_dirty = True
+                        task.register_history()
+                    else:
+                        return
+                    org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
+                    rendered_img = render_frame(org_img,task)
+                    interface_lock.release()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(e)
+                exit(1)
 
         @key_handler.register_op_wrap(Operation.CLEAR)
         def clear(key):
-            print('Clearing selection')
+            nonlocal propagate
             interface_lock.acquire()
-            frame, obj, selection = task.prompts.get_selection()
-            if selection is None:
-                interface_lock.release()
+            propagate = None
+            if flag_labeling:
+                print('Please press ENTER finish label')
                 return
-            selection = None
-            task.prompts.set_selection(selection)
-            task.update_selection()
-            history.register(task.prompts)
+            print('Clearing selection')
+            task.clear_frame()
             interface_lock.release()
 
         @key_handler.register_op_wrap(Operation.QUIT)
@@ -199,66 +266,135 @@ def main():
             key_handler.stop()
             exit(0)
 
+        @key_handler.register_key_wrap(keyboard.Keys.LEFT | keyboard.Keys.CTRL_L, keyboard.Event.PRESS)
+        def fast_left(key):
+            nonlocal propagate, rendered_img
+            interface_lock.acquire()
+            propagate = None
+            if flag_labeling:
+                print('Please press ENTER finish label')
+                return
+            if not task.fast_left():
+                print('No more frames')
+            org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
+            rendered_img = render_frame(org_img,task)
+            interface_lock.release()
+
+        @key_handler.register_key_wrap(keyboard.Keys.RIGHT | keyboard.Keys.CTRL_L, keyboard.Event.PRESS)
+        def fast_right(key):
+            nonlocal propagate, rendered_img
+            interface_lock.acquire()
+            propagate = None
+            if flag_labeling:
+                print('Please press ENTER finish label')
+                return
+            if not task.fast_right():
+                print('No more frames')
+            org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
+            rendered_img = render_frame(org_img,task)
+            interface_lock.release()
+
         @key_handler.register_op_wrap(Operation.UNDO)
         def undo(key):
+            nonlocal rendered_img, propagate, flag_labeling, is_dirty
             interface_lock.acquire()
-            task.prompts = history.undo()
-            task.update_selection()
+            propagate = None
+            task.redo()
+            flag_labeling = True
+            is_dirty = True
+            print('Start labeling')
             org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
-            render_frame(org_img, task)
+            rendered_img = render_frame(org_img,task)
             interface_lock.release()
 
         @key_handler.register_op_wrap(Operation.REDO)
         def redo(key):
+            nonlocal rendered_img,propagate, flag_labeling
             interface_lock.acquire()
-            task.prompts = history.redo()
-            task.update_selection()
+            propagate = None
+            task.redo()
+            flag_labeling = True
+            is_dirty = True
+            print('Start labeling')
             org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
-            render_frame(org_img, task)
+            rendered_img = render_frame(org_img,task)
             interface_lock.release()
 
         @key_handler.register_op_wrap(Operation.SAVE)
         def save(key):
+            if flag_labeling:
+                print('Please press ENTER finish label')
+                return
             interface_lock.acquire()
             task.save()
             interface_lock.release()
 
         @key_handler.register_op_wrap(Operation.PROCESS)
         def process(key):
-            nonlocal propagate
+            nonlocal propagate, flag_labeling
             interface_lock.acquire()
+            if flag_labeling:
+                print('Please press ENTER finish label')
+                return
+            if propagate is not None:
+                print('Propagation already running')
+                return
+            if not task.is_keyframe():
+                print('Not keyframe')
+                return
             propagate = task.propagate()
             interface_lock.release()
 
-        @key_handler.register_op_wrap(Operation.NEXT_OBJ)
-        def next_obj(key):
+        @key_handler.register_op_wrap(Operation.PROCESS_REVERT)
+        def process_revert(key):
+            nonlocal propagate, flag_labeling
             interface_lock.acquire()
-            task.next_obj()
-            render_frame(org_img, task)
+            if flag_labeling:
+                print('Please press ENTER finish label')
+                return
+            if propagate is not None:
+                print('Propagation already running')
+                return
+            if not task.is_keyframe():
+                print('Not keyframe')
+                return
+            propagate = task.propagate(revert=True)
             interface_lock.release()
 
-        @key_handler.register_op_wrap(Operation.PREV_OBJ)
-        def prev_obj(key):
+        @key_handler.register_key_wrap(keyboard.Keys.SPACE, keyboard.Event.PRESS)
+        def stop_propagation(key):
+            nonlocal propagate
             interface_lock.acquire()
-            task.prev_obj()
-            render_frame(org_img, task)
+            if propagate is not None:
+                print('Stopping propagation')
+                propagate = None
             interface_lock.release()
+
 
         wnd = cv2.namedWindow('image', cv2.WINDOW_KEEPRATIO)
         cv2.setMouseCallback('image', mouse_callback)
         while True:
+            interface_lock.acquire()
             if propagate is not None:
+                if flag_labeling:
+                    propagate = None
+                    interface_lock.release()
+                    continue
                 print('Propagating')
+                frame_wait.start_frame()
                 try:
                     next(propagate)
                 except StopIteration:
                     propagate = None
+                    frame_wait.wait_frame()
+                    interface_lock.release()
                     continue
+                frame_wait.wait_frame()
                 org_img = image_reader.read_with_preload(task.frames, task.get_current_frame_idx())
-                render_frame(org_img, task)
-
+                rendered_img = render_frame(org_img,task)
+            interface_lock.release()
             cv2.imshow('image', rendered_img)
-            cv2.waitKey(30)
+            # cv2.waitKey(2000)
 
             
 if __name__ == '__main__':

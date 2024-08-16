@@ -9,6 +9,10 @@ class HistorySlice:
         self.__size = 0
         self.__maxsize = maxsize
 
+    @property
+    def maxsize(self):
+        return self.__maxsize
+
     def __len__(self):
         return self.__size
 
@@ -115,7 +119,13 @@ class History:
         else:
             return None
 
-
+    def clear(self, init_state = None):
+        if init_state is None:
+            init_state = self.__history[0]
+        maxsize = self.__history.maxsize
+        self.__history = HistorySlice(len(maxsize))
+        self.__history_index = 0
+        self.__history.append(init_state)
     # def __get_history(self,obj):
     #     if self.__key(obj) not in self.__history:
     #         self.__history[self.__key(obj)] = HistorySlice(MAX_HISTORY_SIZE)

@@ -10,6 +10,8 @@ import torch
 
 from tqdm import tqdm
 
+import traceback
+
 from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
 
@@ -100,6 +102,11 @@ class SAM2VideoPredictor(SAM2Base):
             "cond_frame_outputs": set(),  # set containing frame indices
             "non_cond_frame_outputs": set(),  # set containing frame indices
         }
+
+        print('==================== set track false ===================')
+        traceback.print_stack()
+        print('==================== set track false ===================')       
+
         # metadata for each tracking frame (e.g. which direction it's tracked)
         inference_state["tracking_has_started"] = False
         inference_state["frames_already_tracked"] = {}
@@ -726,9 +733,22 @@ class SAM2VideoPredictor(SAM2Base):
         inference_state["output_dict"]["cond_frame_outputs"].clear()
         inference_state["output_dict"]["non_cond_frame_outputs"].clear()
         inference_state["consolidated_frame_inds"]["cond_frame_outputs"].clear()
-        inference_state["consolidated_frame_inds"]["non_cond_frame_outputs"].clear()
+        inference_state["consolidated_frame_inds"]["non_cond_frame_outputs"].clear() 
         inference_state["tracking_has_started"] = False
         inference_state["frames_already_tracked"].clear()
+
+# MODIFY: add clear_track() method
+    def clear_track(self, inference_state, frame, obj_id):
+        """Clear the tracking results for a specific object."""
+        obj_idx = self._obj_id_to_idx(inference_state, obj_id)
+        obj_output_dict = inference_state["output_dict_per_obj"][obj_idx]
+        obj_temp_output_dict = inference_state["temp_output_dict_per_obj"][obj_idx]
+        for storage_key in ["cond_frame_outputs", "non_cond_frame_outputs"]:
+            obj_output_dict[storage_key].pop(frame, None)
+            obj_temp_output_dict[storage_key].pop(frame, None)
+        inference_state["point_inputs_per_obj"][obj_idx].pop(frame, None)
+        inference_state["mask_inputs_per_obj"][obj_idx].pop(frame, None)
+        inference_state["frames_already_tracked"].pop(frame, None)
 
     def _get_image_feature(self, inference_state, frame_idx, batch_size):
         """Compute the image features on a given frame."""

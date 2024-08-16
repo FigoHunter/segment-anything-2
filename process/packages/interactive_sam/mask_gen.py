@@ -3,7 +3,9 @@ import torch
 from enum import Enum
 import numpy as np
 # import matplotlib.pyplot as plt
+import traceback
 from PIL import Image
+from .history import History
 from .utils import WORKSPACE, create_temp_folder
 
 class Sam2ImageHandle:
@@ -99,16 +101,18 @@ class Sam2VideoHandle:
 
     class Task:
         class State(Enum):
-            NOT_STARTED = 0
-            STARTED = 1
+            NOT_INIT = 0
+            INIT = 1
 
         def __init__(self, handle, frames):
-            self._state = self.State.NOT_STARTED
+            self._state = self.State.NOT_INIT
             self._handle = handle
             self._frames = frames
             self._infer_state = None
             self._prompts = Sam2VideoPrompt(frame_count=len(frames), obj_idx=self.obj_idx)
             self._mask_cache = [None]*len(self.frames)
+            self._cache_relation = {}
+            self._prompts_history = History(self._prompts, 100)
         
         
         @property
@@ -124,10 +128,6 @@ class Sam2VideoHandle:
             return self.handle.predictor
         
         @property
-        def prompts(self):
-            return self._prompts
-
-        @property
         def state(self):
             return self._state
         
@@ -136,24 +136,48 @@ class Sam2VideoHandle:
             return self.handle.obj_idx
 
         def start(self):
+            if self.state != self.State.NOT_INIT:
+                self.reset()
+                print('Task already started. Executed Task.reset()')
+                return
             self._infer_state = self.predictor.init_state(image_paths=self._frames)
             print('infer_state:', self._infer_state)
             self.predictor.reset_state(self._infer_state)
             print('reset_state:', self._infer_state)
-            self._state = self.State.STARTED
+            self._state = self.State.INIT
 
         def reset(self, *, clear_prompts=True, clear_cache=True):
+            if self.state == self.State.NOT_INIT:
+                raise Exception("Task not started. Call Task.start() first")
             self.predictor.reset_state(self._infer_state)
             self._dirty = False
             if clear_prompts:
-                self.prompts.clear()
+                self._prompts.clear()
             if clear_cache:
                 self._mask_cache = [None]*len(self.frames)
-            self._state = self.State.STARTED
+                self._cache_relation = {}
+                self._prompts_history.clear()
+            self._state = self.State.INIT
+
+        def clear_frame(self, frame = None, clear_track=True):
+            if frame is None:
+                frame = self._prompts.selected_frame
+            self._prompts.clear_frame(frame)
+            if clear_track:
+                self._clean_cache_relation(frame)
+                self.predictor.clear_track(self._infer_state, frame)
+                
+        def set_selection(self, selection):
+            self._prompts.set_selection(selection)
 
         def update_selection(self):
-            frame, obj, selection = self.prompts.get_selection()
-            if selection is not None:
+            objs = self._prompts.get_objs()
+            frame = self._prompts.selected_frame
+            for obj in objs:
+                _,_,selection = self._prompts.get_selection(frame=frame, obj=obj)
+                if selection is None:
+                    print('Warning: No selection found for object', obj, 'reverting to previous state')
+                    continue
                 points = np.array([*selection[0], *selection[1]], dtype=np.float32)
                 include_count = len(selection[0])
                 exclude_count = len(selection[1])
@@ -166,59 +190,88 @@ class Sam2VideoHandle:
                     labels=labels,
                     clear_old_points=True,
                 )
-                masks = masks.cpu().numpy()
-                self._cache_mask(frame, objs, masks)
-                self._clean_cache_from(frame + 1)
-            else:
-                self._clean_cache_from(frame)
-                self.predictor.add_new_points(
-                    inference_state=self._infer_state,
-                    frame_idx=frame,
-                    obj_id=obj,
-                    points=np.array([], dtype=np.float32),
-                    labels=np.array([], np.int32),
-                    clear_old_points=True,
-                )
-                objs, masks = self.get_current_masks()
-                
+            masks = masks.cpu().numpy()
+            self._clean_cache_relation(frame)
+            self._cache_mask(frame, objs, masks)
             return objs, masks
 
+        def get_selection(self):
+            _, _, selection = self._prompts.get_selection()
+            return selection
+
         def get_current_frame(self):
-            idx = self.prompts.selected_frame
+            idx = self._prompts.selected_frame
             if idx < 0 or idx >= len(self.frames):
                 raise ValueError(f"Invalid frame index {idx}")
-            return self.frames[self.prompts.selected_frame]
+            return self.frames[self._prompts.selected_frame]
     
+        def get_current_obj(self):
+            idx = self._prompts.selected_obj
+            return idx
         
         def get_current_frame_idx(self):
-            return self.prompts.selected_frame
+            return self._prompts.selected_frame
             
         def get_current_masks(self):
-            frame = self.prompts.selected_frame
+            frame = self._prompts.selected_frame
             objs, masks = self._get_cached_masks(frame)
-            if objs is not None and masks is not None:
-                return objs, masks
-            print('current_frame:', frame)
-            enumerate = self.predictor.propagate_in_video(
-                self._infer_state, start_frame_idx=frame, max_frame_num_to_track=1)
-            frame, obj_ids, masks = next(enumerate)
-            print('processed_frame:', frame)
-            masks = masks.cpu().numpy()
-            self._cache_mask(frame, obj_ids, masks)
-            return obj_ids, masks
+            return objs, masks
 
-        def propagate(self):
-            frame = self.prompts.selected_frame
+        def is_keyframe(self, frame=None):
+            return len(self._prompts.get_objs(frame))>0
+
+        def propagate(self, revert=False):
+            frame = self._prompts.selected_frame
             print('current_frame:', frame)
+            print('==================== propagate ===================')
+            traceback.print_stack()
+            print('==================== propagate ===================')
+            keyframe = frame
+
             for frame, obj_ids, masks in self.predictor.propagate_in_video(
-                self._infer_state, start_frame_idx=frame, max_frame_num_to_track=1):
-                self.prompts.selected_frame += 1
+                self._infer_state, start_frame_idx=frame, revert=revert):
+                self._prompts.selected_frame += 1
                 print('processed_frame:', frame)
                 masks = masks.cpu().numpy()
                 self._cache_mask(frame, obj_ids, masks)
+                if self.is_keyframe(frame):
+                    keyframe = frame
+                else:
+                    self._add_cache_relation(frame, keyframe)
                 yield frame, obj_ids, masks
 
+        def register_history(self):
+            self._prompts_history.register(self._prompts)
 
+        def redo(self):
+            prompts = self._prompts_history.redo(False)
+            if prompts is None:
+                return
+            self._prompts = prompts
+        
+        def undo(self):
+            prompts = self._prompts_history.undo(False)
+            if prompts is None:
+                return
+            self._prompts = prompts
+
+        def fast_left(self):
+            start_index = self._prompts.selected_frame
+            for frame in range(start_index-1, -1, -1):
+                if self.is_keyframe(frame):
+                    self._prompts.selected_frame = frame
+                    return True
+            self._prompts.selected_frame = start_index
+            return False
+
+        def fast_right(self):
+            start_index = self._prompts.selected_frame
+            for frame in range(start_index+1, len(self.frames)):
+                if self.is_keyframe(frame):
+                    self._prompts.selected_frame = frame
+                    return True
+            self._prompts.selected_frame = start_index
+            return False
         # def get_mask(self, use_cache=True, process_if_needed=True):
         #     frame, obj, selection = self.prompts.get_selection()
         #     if use_cache:
@@ -246,26 +299,41 @@ class Sam2VideoHandle:
         #     return out_mask_logits
         
         def next_frame(self):
-            self.prompts.selected_frame += 1
+            self._prompts.selected_frame += 1
 
         def prev_frame(self):
-            self.prompts.selected_frame -= 1
+            self._prompts.selected_frame -= 1
 
         def next_obj(self):
-            self.prompts.selected_obj += 1
+            self._prompts.selected_obj += 1
 
         def prev_obj(self):
-            self.prompts.selected_obj -= 1
+            self._prompts.selected_obj -= 1
 
         def _cache_mask(self, frame, objs, masks, *, clear_frame=True):
-            if clear_frame | self._mask_cache[frame] is None:
+            if clear_frame | (self._mask_cache[frame] is None):
                 self._mask_cache[frame] = {}
             for obj, mask in zip(objs, masks):
                 self._mask_cache[frame][obj] = mask
 
-        def _clean_cache_from(self, frame):
-            for i in range(frame, len(self.frames)):
-                self._mask_cache[i] = None
+        def _add_cache_relation(self, cur_frame, ref_frame):
+            if ref_frame not in self._cache_relation:
+                self._cache_relation[ref_frame] = set()
+            self._cache_relation[ref_frame].add(cur_frame)
+
+        def _clean_cache_relation(self, frame):
+            if frame not in self._cache_relation:
+                return
+            self._mask_cache[frame] = None
+            for f in self._cache_relation[frame]:
+                self._mask_cache[f] = None
+            del self._cache_relation[frame]
+
+        def _iter_cache_relation(self, ref_frame):
+            if ref_frame not in self._cache_relation:
+                return
+            for frame in self._cache_relation[ref_frame]:
+                yield frame
 
         def _get_cached_mask(self, frame, obj):
             if self._mask_cache[frame] is None:
@@ -276,7 +344,7 @@ class Sam2VideoHandle:
             objs = []
             masks = []
             if self._mask_cache[frame] is None:
-                return None, None
+                return objs, masks
             for obj, mask in self._mask_cache[frame].items():
                 objs.append(obj)
                 masks.append(mask)
@@ -342,6 +410,8 @@ class Sam2VideoPrompt(dict):
         self._selected_obj = 0
         self._frame_count = frame_count
         self._obj_idx = obj_idx
+        if self._obj_idx is not None:
+            self._selected_obj = self._obj_idx[0]
         
 
     @property
@@ -366,11 +436,13 @@ class Sam2VideoPrompt(dict):
 
     @property
     def selected_obj(self):
-        return self._selected_obj
+        id = self._get_valid_obj_id(self._selected_obj)
+        return id
     
     @selected_obj.setter
     def selected_obj(self, value):
-        self._selected_obj = value
+        id = self._get_valid_obj_id(value)
+        self._selected_obj = id
 
     def clear(self):
         self._selected_frame = -1
@@ -394,6 +466,12 @@ class Sam2VideoPrompt(dict):
             return frame, obj, None
         return frame, obj, selected
     
+    def clear_frame(self, frame=None):
+        if frame is None:
+            frame = self.selected_frame
+        if frame in self:
+            del self[frame]
+
     def set_selection(self, selection, *, frame=None, obj=None):
         if frame is None:
             frame = self.selected_frame
@@ -403,8 +481,8 @@ class Sam2VideoPrompt(dict):
             if frame in self:
                 if obj in self[frame]:
                     del self[frame][obj]
-                    if len(self[obj]) == 0:
-                        del self[obj]
+                    if len(self[frame]) == 0:
+                        del self[frame]
         else:
             if self.selected_frame not in self:
                 self[self.selected_frame] = {}
@@ -416,7 +494,13 @@ class Sam2VideoPrompt(dict):
             frame = self.selected_frame
         return self.get(frame, {}).keys()
     
-    
+    def _get_valid_obj_id(self, obj_id):
+        if self.obj_idx is None and obj_id < 0:
+            raise ValueError("Object index can not be negative")
+        if self.obj_idx is not None and obj_id not in self.obj_idx:
+            raise ValueError(f"Invalid object index {obj_id}")
+        return obj_id
+        
 
 def init_sam2_video():
     # use bfloat16 for the entire notebook

@@ -7,10 +7,11 @@ class Operation(Enum):
     PREV_IMG        = 2
     NEXT_OBJ        = 3
     PREV_OBJ        = 4
-    SAVE            = 3
-    UNDO            = 4
-    REDO            = 5
-    PROCESS         = 6
+    SAVE            = 5
+    UNDO            = 6
+    REDO            = 7
+    PROCESS         = 8
+    PROCESS_REVERT  = 9
     CLEAR           = 100
     QUIT            = 999
 
@@ -31,6 +32,8 @@ class Operation(Enum):
             return Keys.CTRL_L | Keys.UP
         elif self == Operation.PROCESS:
             return Keys.CTRL_L | Keys.KEY_P
+        elif self == Operation.PROCESS_REVERT:
+            return Keys.CTRL_L | Keys.KEY_R
         elif self == Operation.CLEAR:
             return Keys.DELETE
         elif self == Operation.QUIT:
