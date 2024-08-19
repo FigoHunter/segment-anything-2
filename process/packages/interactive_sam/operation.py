@@ -17,9 +17,9 @@ class Operation(Enum):
 
     def get_key(self):
         if self == Operation.NEXT_IMG:
-            return Keys.CTRL_L | Keys.RIGHT
+            return Keys.RIGHT
         elif self == Operation.PREV_IMG:
-            return Keys.CTRL_L | Keys.LEFT
+            return Keys.LEFT
         elif self == Operation.SAVE:
             return Keys.CTRL_L | Keys.ENTER
         elif self == Operation.UNDO:

@@ -10,8 +10,6 @@ import torch
 
 from tqdm import tqdm
 
-import traceback
-
 from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
 
@@ -102,10 +100,6 @@ class SAM2VideoPredictor(SAM2Base):
             "cond_frame_outputs": set(),  # set containing frame indices
             "non_cond_frame_outputs": set(),  # set containing frame indices
         }
-
-        print('==================== set track false ===================')
-        traceback.print_stack()
-        print('==================== set track false ===================')       
 
         # metadata for each tracking frame (e.g. which direction it's tracked)
         inference_state["tracking_has_started"] = False
