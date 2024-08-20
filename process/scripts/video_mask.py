@@ -374,6 +374,7 @@ def main():
                 print('Not keyframe')
                 interface_lock.release()
                 return
+            paused = False
             propagate = task.propagate()
             reverse = False 
             interface_lock.release()
@@ -406,6 +407,7 @@ def main():
                 print('Not keyframe')
                 interface_lock.release()
                 return
+            paused = False
             propagate = task.propagate(reverse=True)
             reverse = True
             interface_lock.release()

@@ -251,7 +251,7 @@ class Sam2VideoHandle:
                 # print('before cache')
                 # print(str([[dict.keys()] if dict else None for dict in self._mask_cache]))
                 # print(self._cache_relation)
-                self._cache_mask(frame, obj_ids, masks)         
+                self._cache_mask(frame, obj_ids, masks, clear_frame=False)         
                 if self.is_keyframe(frame):
                     keyframe = frame
                 else:

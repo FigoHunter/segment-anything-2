@@ -4,6 +4,7 @@ import shutil
 import numpy as np
 from enum import Enum
 from queue import Queue as Q
+from ycb_objects import load
 from threading import Thread, RLock, Event
 
 
@@ -73,6 +74,7 @@ class AsyncCacheSave:
         return handle        
 
     def save_files(self):
+        self._q_lock.acquire()
         self._q.join()
         for frame_id in self._cached_data:
             if self._cached_data[frame_id][1] > self.CacheType.WEAK:
@@ -85,14 +87,16 @@ class AsyncCacheSave:
                 obj_path = os.path.join(path, obj)
                 if os.path.isdir(obj_path):
                     continue
-                obj = os.path.splitext(obj)[0]
+                obj = int(os.path.splitext(obj)[0])
                 dirname = os.path.dirname(self._paths[frame_id])
                 basename = os.path.basename(self._paths[frame_id])
                 frame = int(basename)
+                obj = load.get_object_name(obj)
                 save_path = os.path.join(dirname, obj, f'{frame:06d}.png')
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 print('saving by copy: ', obj_path, save_path)
                 shutil.copy(obj_path, save_path)
+        self._q_lock.release()
             
 
     def __del__(self):

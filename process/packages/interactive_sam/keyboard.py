@@ -2,6 +2,8 @@ from enum import Enum
 from threading import Lock
 from pynput import keyboard
 from ._base import Action
+from threading import Thread, Event
+from queue import Queue
 
 class Event(Enum):
     PRESS = 1
@@ -133,16 +135,24 @@ class ListenerHandler:
         self._listerner = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
         self._current_keys = 0
         self._callback_lock = Lock()
+        self._interacting = False
+        self._trigger_thread = Thread(target=self._trigger, args=(self._get_current_keys, ), daemon=True)
+        self._trigger_job = Queue(1)
+        # self._trigger_event = Event()
+        # self._trigger_event.set()
 
     def start(self):
         self.callback_lock.acquire()
         self._listerner.start()
+        self._trigger_thread.start()
         self.callback_lock.release()
 
 
     def stop(self):
         self.callback_lock.acquire()
         self._listerner.stop()
+        self._trigger_job.empty()
+        self._trigger_job.put('quit')
         self.callback_lock.release()
 
 
@@ -158,6 +168,8 @@ class ListenerHandler:
         self.callback_lock.release()
         return result != 0
         
+    def _get_current_keys(self):
+        return self._current_keys
 
     @property
     def on_press_callbacks(self):
@@ -175,36 +187,52 @@ class ListenerHandler:
     def callback_lock(self):
         return self._callback_lock
 
+    def _trigger(self,get_keys):
+        while True:
+            trigger = self._trigger_job.get()
+            self.callback_lock.acquire()
+            if trigger == 'quit':
+                self.callback_lock.release()
+                break
+            try:
+                trigger(get_keys())
+            except Exception as e:
+                from traceback import print_exc
+                print_exc()
+                print(e)
+            finally:
+                self.callback_lock.release()
+                self._trigger_job.task_done()
+
     def _on_press(self,key):
         code = int(KEYS_MAP.get(key, 0))
         # When a key is pressed, add it to the set we are keeping track of and check if this set is in the dictionary
         self._current_keys = self._current_keys | code
         if self._current_keys in self._on_press_callbacks:
-            self.callback_lock.acquire()
             try:
-                # If the current set of keys are in the mapping, execute the function
-                self._on_press_callbacks[self._current_keys].trigger(self._current_keys)
+                if self._trigger_job.unfinished_tasks <= 0 and self._trigger_job.empty():
+                    # If the current set of keys are in the mapping, execute the function
+                    trigger = self._on_press_callbacks[self._current_keys].trigger
+                    self._trigger_job.put(trigger)
             except Exception as e:
                 from traceback import print_exc
                 print_exc()
                 print(e)
-            finally:
-                self.callback_lock.release()
 
     def _on_release(self,key):
         # When a key is released, remove it from the set we are keeping track of and check if this set is in the dictionary
         code = int(KEYS_MAP.get(key, 0))
         if self._current_keys in self._on_release_callbacks:
-            self.callback_lock.acquire()
             try:
-                # If the current set of keys are in the mapping, execute the function
-                self._on_release_callbacks[self._current_keys].trigger(self.current_keys)
+                if self._trigger_job.unfinished_tasks <= 0 and self._trigger_job.empty():
+                    # If the current set of keys are in the mapping, execute the function
+                    trigger = self._on_release_callbacks[self._current_keys].trigger
+                    self._trigger_job.put(trigger)
             except Exception as e:
                 from traceback import print_exc
                 print_exc()
                 print(e)
-            finally:
-                self.callback_lock.release()
+
         self._current_keys = self._current_keys & ~code
 
     def register_callback(self, keys, event:Event, callback, **kwargs):
