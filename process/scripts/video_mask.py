@@ -1,6 +1,6 @@
 import argparse
 import cv2
-import time
+import os
 from enum import Enum
 from threading import Lock, Thread
 from interactive_sam.mask_gen import init_sam2_video, Sam2VideoHandle
@@ -122,7 +122,8 @@ def main():
 
     handle = init_sam2_video()
     print('init:', handle)
-    tasks = handle.load_frames(path,obj_list, chunk_size=300)
+    rgb_path = os.path.join(path, 'rgb')
+    tasks = handle.load_frames(rgb_path,obj_list, chunk_size=300)
     frame_wait = FrameWait(0.5)
 
     for task in tasks:
